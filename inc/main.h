@@ -5,6 +5,7 @@
 //#include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include "speexx.h"
 #include "stm32f4xx.h"
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_conf.h"
@@ -45,24 +46,33 @@ UART_HandleTypeDef UartHandle;
 #define GPIOE_Clock_Enable()                      __GPIOE_CLK_ENABLE()
 
 // TIM def`s
-TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim2, htim3;
 TIM_OC_InitTypeDef sConfigOC;
 
-//#define TIM1_IRQn                               TIM1_BRK_TIM9_IRQn
 #define TIM2_IRQn                               TIM2_IRQn
+#define TIM3_IRQn                               TIM3_IRQn
 
-//#define TIM1_IRQHandler                         TIM1_IRQHandler
 #define TIM2_IRQHandler                         TIM2_IRQHandler
+#define TIM3_IRQHandler                         TIM3_IRQHandler
 
-//#define TIM1_CLK_ENABLE() __HAL_RCC_TIM1_CLK_ENABLE()
 #define TIM2_CLK_ENABLE() __HAL_RCC_TIM2_CLK_ENABLE()
-
-//#define TIM1_PORT GPIOE
-//#define TIM1_Pin GPIO_PIN_9
 
 #define TIM2_PORT GPIOA
 #define TIM2_Speed_Pin GPIO_PIN_15
 #define TIM2_Rotation_Pin GPIO_PIN_3
+
+//ADC def`s
+ADC_HandleTypeDef hadc1;
+
+DAC_HandleTypeDef hdac;
+DCMI_HandleTypeDef hdcmi;
+
+//DMA def`s
+DMA_HandleTypeDef                DmaHandle;
+#define DMA_STREAM               DMA1_Stream0
+#define DMA_CHANNEL              DMA_CHANNEL_0
+#define DMA_STREAM_IRQ           DMA1_Stream0_IRQn
+#define DMA_STREAM_IRQHandler    DMA1_Stream0_IRQHandler
 
 static void
 Error_Handler(void);

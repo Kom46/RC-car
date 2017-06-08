@@ -9,19 +9,13 @@ ESP_State_TypeDef esp_state = ESP_Init;
 Up_Down_State UpDown = Hold;
 Left_Right_State LeftRight = CNT;
 GPIO_InitTypeDef LED, Rotation_Left, Rotation_Right, Forward, Backward;
-ADC_HandleTypeDef hadc1;
-DAC_HandleTypeDef hdac;
-DCMI_HandleTypeDef hdcmi;
 volatile char uart_rx_buff[RXBUFFERSIZE];
 volatile char uart_tx_buff[1024];
 volatile char *uart_rx_buff_addr;
 volatile bool UART_Ready = false;
-bool RecStart = false;
 uint16_t Speed = 0;
 uint16_t Rotation = 0;
 
-static void
-MX_TIM2_Init(void);
 void
 Config_UART4(uint32_t BaudRate);
 void
@@ -30,6 +24,8 @@ void
 Config_PWM(uint16_t PWM_Val_Speed, uint16_t PWM_Val_Rotation);
 void
 GPIO_Config(void);
+void
+DMA_Config(void);
 void
 send_at_command(char *command, char *answer, uint8_t length);
 void
@@ -40,6 +36,17 @@ void
 flush_uart_buffer(void);
 void
 ReceiveCommand(void);
+static void
+TransferError(DMA_HandleTypeDef *DmaHandle);
+static void
+HalfTransferComplete(DMA_HandleTypeDef *DmaHandle);
+static void
+TransferComplete(DMA_HandleTypeDef *DmaHandle);
+//void MX_ADC1_Init (void);
+//void
+//MX_TIM2_Init(void);
+//void
+//MX_TIM3_Init(void);
 
 int
 main(void)
@@ -47,14 +54,17 @@ main(void)
   SystemInit();
   HAL_Init();
   SystemClock_Config();
+  MX_ADC1_Init();
   MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_DCMI_Init();
   uint32_t SysClk = HAL_RCC_GetSysClockFreq();
   GPIO_Config();
   Config_UART4(115200);
+  Speex_Init();
   while (1)
     {
       ReceiveCommand();
-//      Error_Handler();
     }
 }
 
@@ -70,7 +80,7 @@ Config_UART4(uint32_t BaudRate)
   UartHandle.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   UartHandle.Init.Mode = UART_MODE_TX_RX;
   UartHandle.Init.OverSampling = UART_OVERSAMPLING_16;
-
+  HAL_UART_MspInit(&UartHandle);
   if (HAL_UART_Init(&UartHandle) != HAL_OK)
     {
       Error_Handler();
@@ -122,15 +132,12 @@ flush_uart_buffer(void)
 void
 Config_ESP(void)
 {
-//  send_at_command(AT_RST, "ready", sizeof(AT_RST) - 1);
   send_at_command(ATE0, "OK\r\n", sizeof(ATE0) - 1);
   send_at_command(AT, "OK\r\n", sizeof(AT) - 1);
   send_at_command("AT+CIPSTAMAC?\r\n", "OK\r\n",
       sizeof("AT+CIPSTAMAC?\r\n") - 1);
   send_at_command(AT_CWJAP, "OK\r\n", sizeof(AT_CWJAP) - 1);
   send_at_command(AT_CWMODE_1, "OK\r\n", sizeof(AT_CWMODE_2) - 1);
-//  send_at_command(AT_CIPAP, "OK\r\n", sizeof(AT_CIPAP) - 1);
-//  send_at_command(AT_CWSAP, "OK\r\n", sizeof(AT_CWSAP) - 1);
   send_at_command(AT_CIPMUX1, "OK\r\n", sizeof(AT_CIPMUX1) - 1);
   send_at_command(AT_CIPSERVER, "OK\r\n", sizeof(AT_CIPSERVER) - 1);
   send_at_command(AT_CIPSTA, "OK\r\n", sizeof(AT_CIPSTA) - 1);
@@ -337,13 +344,13 @@ ReceiveCommand(void)
 void
 Config_PWM(uint16_t PWM_Val_Speed, uint16_t PWM_Val_Rotation)
 {
-  HAL_TIM_PWM_Stop(&htim2,TIM_CHANNEL_ALL);
+  HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_ALL);
   sConfigOC.Pulse = PWM_Val_Speed;
   HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   sConfigOC.Pulse = PWM_Val_Rotation;
   HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4);
-  HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_4);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_4);
 }
 
 static void
@@ -440,6 +447,12 @@ void TIM2_IRQHandler(void)
   HAL_TIM_IRQHandler(&htim2);
 }
 
+void TIM3_IRQHandler(void)
+{
+  HAL_NVIC_ClearPendingIRQ(TIM3_IRQn);
+  HAL_TIM_IRQHandler(&htim3);
+}
+
 void
 SystemClock_Config(void)
 {
@@ -495,7 +508,7 @@ SystemClock_Config(void)
 }
 
 /* ADC1 init function */
-static void
+void
 MX_ADC1_Init(void)
 {
 
@@ -504,17 +517,20 @@ MX_ADC1_Init(void)
   /**Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
    */
   hadc1.Instance = ADC1;
+  DMA_Config();
+  hadc1.DMA_Handle = &DmaHandle;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 1;
   hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  HAL_ADC_MspInit(&hadc1);
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
     {
       Error_Handler();
@@ -522,124 +538,275 @@ MX_ADC1_Init(void)
 
   /**Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
    */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
     {
       Error_Handler();
     }
-
+  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t) &IN_Buffer[0], FRAME_SIZE * 2)
+      != HAL_OK)
+    {
+      /* Transfer Error */
+      Error_Handler();
+    }
 }
 
-/* DAC init function */
-static void
-MX_DAC_Init(void)
-{
+  /* DAC init function */
+  void
+  MX_DAC_Init(void)
+  {
 
-  DAC_ChannelConfTypeDef sConfig;
+    DAC_ChannelConfTypeDef sConfig;
 
-  /**DAC Initialization
+    /**DAC Initialization
+     */
+    hdac.Instance = DAC;
+    if (HAL_DAC_Init(&hdac) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    /**DAC channel OUT1 config
+     */
+    sConfig.DAC_Trigger = DAC_TRIGGER_NONE;
+    sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+    if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+  }
+
+  /* DCMI init function */
+  void
+  MX_DCMI_Init(void)
+  {
+
+    hdcmi.Instance = DCMI;
+    hdcmi.Init.SynchroMode = DCMI_SYNCHRO_EMBEDDED;
+    hdcmi.Init.PCKPolarity = DCMI_PCKPOLARITY_FALLING;
+    hdcmi.Init.CaptureRate = DCMI_CR_ALL_FRAME;
+    hdcmi.Init.ExtendedDataMode = DCMI_EXTEND_DATA_8B;
+    hdcmi.Init.SyncroCode.FrameEndCode = 0;
+    hdcmi.Init.SyncroCode.FrameStartCode = 0;
+    hdcmi.Init.SyncroCode.LineStartCode = 0;
+    hdcmi.Init.SyncroCode.LineEndCode = 0;
+    hdcmi.Init.JPEGMode = DCMI_JPEG_DISABLE;
+    HAL_DCMI_MspInit(&hdcmi);
+    if (HAL_DCMI_Init(&hdcmi) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+  }
+
+  /* TIM2 init function */
+  void
+  MX_TIM2_Init(void)
+  {
+
+    TIM_ClockConfigTypeDef sClockSourceConfig;
+    TIM_SlaveConfigTypeDef sSlaveConfig;
+    TIM_MasterConfigTypeDef sMasterConfig;
+
+    htim2.Instance = TIM2;
+    htim2.Init.Prescaler = 21;
+    htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim2.Init.Period = 999;
+    htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
+    HAL_TIM_Base_MspInit(&htim2);
+    if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    sSlaveConfig.SlaveMode = TIM_SLAVEMODE_DISABLE;
+    sSlaveConfig.InputTrigger = TIM_TS_ITR0;
+    if (HAL_TIM_SlaveConfigSynchronization(&htim2, &sSlaveConfig) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    HAL_TIM_MspPostInit(&htim2);
+
+  }
+
+  void
+  MX_TIM3_Init(void)
+  {
+
+    TIM_ClockConfigTypeDef sClockSourceConfig;
+    TIM_MasterConfigTypeDef sMasterConfig;
+
+    htim3.Instance = TIM3;
+    htim3.Init.Prescaler = 125;
+    htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim3.Init.Period = 999;
+    htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
+    HAL_TIM_Base_MspInit(&htim3);
+    if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+    HAL_NVIC_SetPriority(TIM3_IRQn, 1, 3);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+
+//  HAL_TIM_MspPostInit(&htim7);
+
+  }
+
+  /**
+   * @brief  Configure the DMA controller according to the Stream parameters
+   *         defined in main.h file
+   * @note  This function is used to :
+   *        -1- Enable DMA2 clock
+   *        -2- Select the DMA functional Parameters
+   *        -3- Select the DMA instance to be used for the transfer
+   *        -4- Select Callbacks functions called after Transfer complete and
+   Transfer error interrupt detection
+   *        -5- Initialize the DMA stream
+   *        -6- Configure NVIC for DMA transfer complete/error interrupts
+   *        -7- Start the DMA transfer using the interrupt mode
+   * @param  None
+   * @retval None
    */
-  hdac.Instance = DAC;
-  if (HAL_DAC_Init(&hdac) != HAL_OK)
-    {
-      Error_Handler();
-    }
 
-  /**DAC channel OUT1 config
-   */
-  sConfig.DAC_Trigger = DAC_TRIGGER_NONE;
-  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
-  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
-    {
-      Error_Handler();
-    }
+  void
+  DMA_Config(void)
+  {
+    /*## -1- Enable DMA2 clock #################################################*/
+    __HAL_RCC_DMA1_CLK_ENABLE();
 
+    /*##-2- Select the DMA functional Parameters ###############################*/
+    DmaHandle.Init.Channel = DMA_CHANNEL; /* DMA_CHANNEL_0                    */
+    DmaHandle.Init.Direction = DMA_PERIPH_TO_MEMORY; /* M2M transfer mode                */
+    DmaHandle.Init.PeriphInc = DMA_PINC_ENABLE; /* Peripheral increment mode Enable */
+    DmaHandle.Init.MemInc = DMA_MINC_ENABLE; /* Memory increment mode Enable     */
+    DmaHandle.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD; /* Peripheral data alignment : Word */
+    DmaHandle.Init.MemDataAlignment = DMA_MDATAALIGN_WORD; /* memory data alignment : Word     */
+    DmaHandle.Init.Mode = DMA_NORMAL; /* Normal DMA mode                  */
+    DmaHandle.Init.Priority = DMA_PRIORITY_HIGH; /* priority level : high            */
+    DmaHandle.Init.FIFOMode = DMA_FIFOMODE_ENABLE; /* FIFO mode enabled                */
+    DmaHandle.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_HALFFULL; /* FIFO threshold: 1/4 full   */
+    DmaHandle.Init.MemBurst = DMA_MBURST_SINGLE; /* Memory burst                     */
+    DmaHandle.Init.PeriphBurst = DMA_PBURST_SINGLE; /* Peripheral burst                 */
+
+    /*##-3- Select the DMA instance to be used for the transfer : DMA1_Stream0 #*/
+    DmaHandle.Instance = DMA_STREAM;
+
+    /*##-4- Initialize the DMA stream ##########################################*/
+    if (HAL_DMA_Init(&DmaHandle) != HAL_OK)
+      {
+        /* Initialization Error */
+        Error_Handler();
+      }
+
+    /*##-5- Select Callbacks functions called after Transfer complete and Transfer error */
+    HAL_DMA_RegisterCallback(&DmaHandle, HAL_DMA_XFER_CPLT_CB_ID,
+        TransferComplete);
+    HAL_DMA_RegisterCallback(&DmaHandle, HAL_DMA_XFER_HALFCPLT_CB_ID,
+        HalfTransferComplete);
+    HAL_DMA_RegisterCallback(&DmaHandle, HAL_DMA_XFER_ERROR_CB_ID,
+        TransferError);
+
+    /*##-6- Configure NVIC for DMA transfer complete/error interrupts ##########*/
+    /* Set Interrupt Group Priority */
+    HAL_NVIC_SetPriority(DMA_STREAM_IRQ, 0, 0);
+
+    /* Enable the DMA STREAM global Interrupt */
+    HAL_NVIC_EnableIRQ(DMA_STREAM_IRQ);
+
+    /*##-7- Start the DMA transfer using the interrupt mode ####################*/
+    /* Configure the source, destination and buffer size DMA fields and Start DMA Stream transfer */
+    /* Enable All the DMA interrupts */
+  }
+
+/**
+ * @brief  DMA conversion complete callback
+ * @note   This function is executed when the transfer complete interrupt
+ *         is generated
+ * @retval None
+ */
+static void
+TransferComplete(DMA_HandleTypeDef *DmaHandle)
+{
+  /* Turn LED4 on: Transfer correct */
+  Start_Encoding = 2;
 }
 
-/* DCMI init function */
 static void
-MX_DCMI_Init(void)
+HalfTransferComplete(DMA_HandleTypeDef *DmaHandle)
 {
-
-  hdcmi.Instance = DCMI;
-  hdcmi.Init.SynchroMode = DCMI_SYNCHRO_EMBEDDED;
-  hdcmi.Init.PCKPolarity = DCMI_PCKPOLARITY_FALLING;
-  hdcmi.Init.CaptureRate = DCMI_CR_ALL_FRAME;
-  hdcmi.Init.ExtendedDataMode = DCMI_EXTEND_DATA_8B;
-  hdcmi.Init.SyncroCode.FrameEndCode = 0;
-  hdcmi.Init.SyncroCode.FrameStartCode = 0;
-  hdcmi.Init.SyncroCode.LineStartCode = 0;
-  hdcmi.Init.SyncroCode.LineEndCode = 0;
-  hdcmi.Init.JPEGMode = DCMI_JPEG_DISABLE;
-  if (HAL_DCMI_Init(&hdcmi) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
+  /* Turn LED4 on: Transfer correct */
+  Start_Encoding = 1;
+  EncodingVoice();
 }
 
-/* TIM2 init function */
+/**
+ * @brief  DMA conversion error callback
+ * @note   This function is executed when the transfer error interrupt
+ *         is generated during DMA transfer
+ * @retval None
+ */
 static void
-MX_TIM2_Init(void)
+TransferError(DMA_HandleTypeDef *DmaHandle)
 {
+  /* Turn LED5 on: Transfer Error */
+  Error_Handler();
+  EncodingVoice();
+}
 
-  TIM_ClockConfigTypeDef sClockSourceConfig;
-  TIM_SlaveConfigTypeDef sSlaveConfig;
-  TIM_MasterConfigTypeDef sMasterConfig;
-
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 21;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1000;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  sSlaveConfig.SlaveMode = TIM_SLAVEMODE_DISABLE;
-  sSlaveConfig.InputTrigger = TIM_TS_ITR0;
-  if (HAL_TIM_SlaveConfigSynchronization(&htim2, &sSlaveConfig) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-  HAL_TIM_MspPostInit(&htim2);
-
+static void DMA_STREAM_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&DmaHandle);
 }
 /* USER CODE BEGIN 4 */
 
@@ -680,4 +847,3 @@ void assert_failed(uint8_t* file, uint32_t line)
  */
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
-
